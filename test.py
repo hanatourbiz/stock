@@ -9,7 +9,7 @@ import plotly.express as px
 # 1. 페이지 설정 및 디자인 주입
 st.set_page_config(page_title="김팀장님의 주식관리 시스템 V2", layout="wide")
 
-# 커스텀 CSS: 자산 요약 블록 크기 및 세로 정렬 보정
+# 커스텀 CSS: 자산 요약 및 버튼 스타일 수정
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@100;400;700&display=swap');
@@ -36,11 +36,26 @@ st.markdown("""
     
     /* 세로 중앙 정렬용 스타일 */
     .v-center {
-        line-height: 2.5; /* 한 줄 텍스트의 높이를 조절하여 중앙 배치 */
+        line-height: 2.5;
         font-weight: bold;
     }
 
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #007BFF; color: white; border: none; }
+    /* [수정] 리스트 내 버튼 스타일링: 배경 제거 및 텍스트 강조 */
+    .stButton>button[kind="secondary"] {
+        background-color: transparent;
+        border: none;
+        color: #007BFF; /* 수정 버튼 파란색 */
+        text-decoration: underline;
+        padding: 0;
+        height: auto;
+        font-size: 0.85em;
+    }
+    /* 삭제 버튼 전용 스타일 (빨간색) */
+    div[data-testid="column"]:nth-child(10) .stButton>button {
+        color: #dc3545 !important;
+    }
+
+    .stButton>button[kind="primary"] { width: 100%; border-radius: 5px; height: 3em; background-color: #007BFF; color: white; border: none; }
     .reportview-container .main .block-container { padding-top: 2rem; }
     </style>
     """, unsafe_allow_html=True)
@@ -68,23 +83,20 @@ def load_cash():
 def save_cash(cash):
     with open(CASH_FILE, "w") as f: f.write(str(cash))
 
+# [수정] KRX 접속 에러 방지용 함수
 @st.cache_data
 def get_stock_list():
     try:
-        # 1. 먼저 KRX 상장사 목록 시도
         df_krx = fdr.StockListing('KRX')
         stocks = df_krx[['Name', 'Code']].set_index('Name').to_dict()['Code']
-    except Exception as e:
+    except:
         try:
-            # 2. 실패 시 네이버 금융 데이터로 우회 시도
             df_krx = fdr.StockListing('KOSPI')
             df_kosdaq = fdr.StockListing('KOSDAQ')
             df_combined = pd.concat([df_krx, df_kosdaq])
             stocks = df_combined[['Name', 'Code']].set_index('Name').to_dict()['Code']
         except:
-            # 3. 최후의 수단: 빈 딕셔너리 반환 (앱이 멈추지 않게 함)
             stocks = {"삼성전자": "005930", "SK하이닉스": "000660"} 
-    
     try:
         df_etf = fdr.StockListing('ETF/KR')
         etfs = df_etf[['Name', 'Symbol']].set_index('Name').to_dict()['Symbol']
@@ -122,14 +134,14 @@ if not st.session_state.portfolio.empty:
             except: continue
     portfolio_details = sorted(portfolio_details, key=lambda x: x['val_amt'], reverse=True)
 
-# --- 상단 타이틀 ---
+# --- 타이틀 ---
 st.title("📈 주식 관리 대시보드")
 st.write(f"**{date.today()}** 기준 | 타이밍 관리기")
 
-# --- A. 실시간 리스트 (세로 정렬 반영) ---
+# --- A. 실시간 리스트 (버튼 텍스트 및 스타일 수정) ---
 if portfolio_details:
     st.subheader("🚨 실시간 모니터링 및 투자 신호")
-    h = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.4, 0.4])
+    h = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5]) # 너비 소폭 조정
     titles = ["종목명", "기준일(고점)", "평단가", "수량", "평가금액", "현재가(대비)", "수익(률)", "신호", "", ""]
     for i, t in enumerate(titles): h[i].markdown(f"<p style='color:gray; font-size:0.9em;'><b>{t}</b></p>", unsafe_allow_html=True)
     
@@ -141,9 +153,8 @@ if portfolio_details:
         elif curr <= (mx * (1 - r['익절기준']/100)) and p_rate > 0: sig, clr, bg = "💰 익절(TAKE)", "white", "#28a745"
         elif p_rate >= 50: sig, clr, bg = "🔥 ADD(추매)", "white", "#007bff"
 
-        d = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.4, 0.4])
+        d = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5])
         
-        # 세로 중앙 정렬 클래스(v-center) 적용
         d[0].markdown(f"<div class='v-center'>{r['종목명']}</div>", unsafe_allow_html=True)
         d[1].markdown(f"<span style='font-size:0.85em;'>{r['기준일']}<br>(高:{mx:,.0f})</span>", unsafe_allow_html=True)
         d[2].markdown(f"<div class='v-center'>{r['평균매수가']:,.0f}</div>", unsafe_allow_html=True)
@@ -158,11 +169,16 @@ if portfolio_details:
         
         d[7].markdown(f"<div style='margin-top:12px; background-color:{bg}; color:{clr}; padding:4px 8px; border-radius:15px; text-align:center; font-weight:bold; font-size:0.7em;'>{sig}</div>", unsafe_allow_html=True)
         
-        if d[8].button("📝", key=f"e_{item['idx']}"):
-            st.session_state.edit_index = item['idx']; st.rerun()
-        if d[9].button("🗑️", key=f"d_{item['idx']}"):
-            st.session_state.portfolio = st.session_state.portfolio.drop(item['idx'])
-            save_data(st.session_state.portfolio); st.rerun()
+        # [수정] 아이콘 대신 텍스트로 변경 및 세로 중앙 정렬
+        with d[8]:
+            st.markdown("<div style='padding-top:12px;'></div>", unsafe_allow_html=True)
+            if st.button("수정", key=f"e_{item['idx']}"):
+                st.session_state.edit_index = item['idx']; st.rerun()
+        with d[9]:
+            st.markdown("<div style='padding-top:12px;'></div>", unsafe_allow_html=True)
+            if st.button("삭제", key=f"d_{item['idx']}"):
+                st.session_state.portfolio = st.session_state.portfolio.drop(item['idx'])
+                save_data(st.session_state.portfolio); st.rerun()
 
 st.divider()
 
@@ -225,5 +241,4 @@ with c_btm2:
     st.subheader("💵 현금 관리")
     nc = st.number_input("현재 보유 예수금(원)", value=curr_cash, step=10000.0)
     if st.button("현금 잔액 업데이트"):
-
         save_cash(nc); st.rerun()
