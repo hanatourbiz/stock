@@ -83,10 +83,10 @@ def save_cash(cash):
 def get_stock_list():
     try:
         df_krx = fdr.StockListing('KRX')
-        # Market 정보를 함께 가져와서 .KS / .KQ 구분 기반 마련
         stocks = {}
         for _, row in df_krx.iterrows():
             code = row['Code']
+            # 코스닥 종목은 .KQ, 코스피는 .KS를 붙여서 저장
             suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ" if row['Market'] == 'KOSDAQ' else ""
             stocks[row['Name']] = f"{code}{suffix}"
     except:
@@ -113,10 +113,10 @@ if not st.session_state.portfolio.empty:
     with st.spinner('실시간 시세 동기화 중...'):
         for idx, row in st.session_state.portfolio.iterrows():
             ticker = str(row['종목코드'])
-            # [개선 반영] 접미사가 없는 경우만 처리 (속도 향상을 위해 period="1mo"로 최적화)
-            yf_ticker = ticker if "." in ticker else f"{ticker}.KS"
+            # [수정] 이미 종목코드에 .KS나 .KQ가 포함되어 있으므로 그대로 사용
+            yf_ticker = ticker 
+            
             try:
-                # 1년치 데이터 대신 최근 1개월(고점 계산용) 데이터만 가져와 속도 개선
                 df_h = yf.Ticker(yf_ticker).history(period="1mo") 
                 if not df_h.empty:
                     ref_dt = pd.to_datetime(row['기준일']).tz_localize('Asia/Seoul')
@@ -138,7 +138,6 @@ st.write(f"**{date.today()}** 기준")
 # --- A. 실시간 리스트 ---
 if portfolio_details:
     st.subheader("■실시간 모니터링 및 신호 확인")
-    # [개선 반영] vertical_alignment="center"를 사용하여 CSS 의존도 낮춤
     h = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5], vertical_alignment="center")
     titles = ["종목명", "기준일(고점)", "평단가", "수량", "평가금액", "현재가(대비)", "수익(률)", "신호", "", ""]
     for i, t in enumerate(titles): h[i].markdown(f"<p style='color:gray; font-size:0.9em; margin-bottom:0;'><b>{t}</b></p>", unsafe_allow_html=True)
@@ -237,4 +236,3 @@ with c_btm2:
     nc = st.number_input("현재 보유 예수금(원)", value=curr_cash, step=10000.0)
     if st.button("현금 잔액 업데이트"):
         save_cash(nc); st.rerun()
-
