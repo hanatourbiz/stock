@@ -7,9 +7,9 @@ from datetime import datetime, date
 import plotly.express as px
 
 # 1. 페이지 설정 및 디자인 주입
-st.set_page_config(page_title="김팀장님의 주식관리 시스템 V2", layout="wide")
+st.set_page_config(page_title="김팀장님의 주식관리 시스템 V2.5", layout="wide")
 
-# 커스텀 CSS: 기존 스타일 유지
+# 커스텀 CSS
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@100;400;700&display=swap');
@@ -55,7 +55,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 데이터 관리 함수 (유지)
+# 2. 데이터 관리 함수
 DB_FILE = "portfolio.csv"
 CASH_FILE = "cash.txt"
 
@@ -64,7 +64,7 @@ def load_data():
         df = pd.read_csv(DB_FILE)
         df['기준일'] = pd.to_datetime(df['기준일']).dt.strftime('%Y-%m-%d')
         return df
-    return pd.DataFrame(columns=["종목명", "종목코드", "기준일", "평균매수가", "주식수", "익절기준"])
+    return pd.DataFrame(columns=["종목명", "종목코드", "기준일", "평균매수가", "주식수", "익절기준", "통화"])
 
 def save_data(df): df.to_csv(DB_FILE, index=False)
 
@@ -78,93 +78,128 @@ def load_cash():
 def save_cash(cash):
     with open(CASH_FILE, "w") as f: f.write(str(cash))
 
-# [개선 반영] KRX 접속 에러 방지 및 코스피/코스닥 구분 로직 강화
+# 실시간 환율 정보 가져오기 (미국, 일본, 영국, 스위스)
+@st.cache_data(ttl=3600)
+def get_exchange_rates():
+    rates = {'KRW': 1.0}
+    symbols = {'USD': 'USDKRW=X', 'JPY': 'JPYKRW=X', 'GBP': 'GBPKRW=X', 'CHF': 'CHFKRW=X'}
+    for curr, sym in symbols.items():
+        try:
+            data = yf.Ticker(sym).history(period="1d")
+            rates[curr] = data['Close'].iloc[-1]
+        except:
+            rates[curr] = 1.0 # 에러 발생 시 1로 유지
+    return rates
+
+# 1. 코스닥 대응 및 해외 주식 리스트 통합
 @st.cache_data
 def get_stock_list():
+    stocks = {}
+    # 한국 (코스피, 코스닥)
     try:
         df_krx = fdr.StockListing('KRX')
-        # Market 정보를 함께 가져와서 .KS / .KQ 구분 기반 마련
-        stocks = {}
         for _, row in df_krx.iterrows():
             code = row['Code']
             suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ" if row['Market'] == 'KOSDAQ' else ""
-            stocks[row['Name']] = f"{code}{suffix}"
-    except:
-        stocks = {"삼성전자": "005930.KS", "SK하이닉스": "000660.KS"} 
-    
-    try:
-        df_etf = fdr.StockListing('ETF/KR')
-        for _, row in df_etf.iterrows():
-            stocks[row['Name']] = f"{row['Symbol']}.KS"
+            stocks[f"[{row['Market']}] {row['Name']}"] = (f"{code}{suffix}", "KRW")
     except: pass
+    
+    # 주요 해외 지수/종목 샘플 (yfinance용)
+    overseas_samples = {
+        "[USA] Apple": ("AAPL", "USD"), "[USA] Tesla": ("TSLA", "USD"), "[USA] NVIDIA": ("NVDA", "USD"),
+        "[USA] Microsoft": ("MSFT", "USD"), "[UK] AstraZeneca": ("AZN.L", "GBP"),
+        "[JPN] Toyota": ("7203.T", "JPY"), "[SUI] Nestle": ("NESN.SW", "CHF")
+    }
+    stocks.update(overseas_samples)
     return stocks
 
-stock_dict = get_stock_list()
-stock_names = sorted(list(stock_dict.keys()))
+stock_dict_info = get_stock_list()
+stock_names = sorted(list(stock_dict_info.keys()))
+exchange_rates = get_exchange_rates()
 
 if 'portfolio' not in st.session_state: st.session_state.portfolio = load_data()
 if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
 # --- 데이터 계산 ---
 portfolio_details = []
-total_buy_amt = total_val_amt = 0.0
+total_buy_amt_krw = total_val_amt_krw = 0.0
 
 if not st.session_state.portfolio.empty:
-    with st.spinner('실시간 시세 동기화 중...'):
+    with st.spinner('실시간 시세 및 환율 동기화 중...'):
         for idx, row in st.session_state.portfolio.iterrows():
             ticker = str(row['종목코드'])
-            # [개선 반영] 접미사가 없는 경우만 처리 (속도 향상을 위해 period="1mo"로 최적화)
-            yf_ticker = ticker if "." in ticker else f"{ticker}.KS"
+            currency = row.get('통화', 'KRW')
+            rate = exchange_rates.get(currency, 1.0)
+            
+            # JPY의 경우 보통 100엔당 환율로 표기되나 yf는 1엔당으로 가져옴. 
+            # 단, 일본 주식 가격 자체가 엔화 단위이므로 그대로 곱함.
+            
             try:
-                # 1년치 데이터 대신 최근 1개월(고점 계산용) 데이터만 가져와 속도 개선
-                df_h = yf.Ticker(yf_ticker).history(period="1mo") 
+                df_h = yf.Ticker(ticker).history(period="1mo") 
                 if not df_h.empty:
-                    ref_dt = pd.to_datetime(row['기준일']).tz_localize('Asia/Seoul')
+                    # 기준일 처리
+                    ref_dt = pd.to_datetime(row['기준일'])
+                    if df_h.index.tz is not None:
+                        ref_dt = ref_dt.tz_localize(df_h.index.tz)
+                    
                     df_since = df_h[df_h.index >= ref_dt]
                     if df_since.empty: df_since = df_h
-                    curr, mx = df_h['Close'].iloc[-1], df_since['Close'].max()
-                    buy_amt, val_amt = row['평균매수가'] * row['주식수'], curr * row['주식수']
-                    p_rate = ((curr - row['평균매수가']) / row['평균매수가'] * 100) if row['평균매수가'] > 0 else 0
                     
-                    portfolio_details.append({'idx': idx, 'row': row, 'curr': curr, 'mx': mx, 'val_amt': val_amt, 'buy_amt': buy_amt, 'p_rate': p_rate})
-                    total_buy_amt += buy_amt; total_val_amt += val_amt
+                    curr_price = df_h['Close'].iloc[-1]
+                    max_price = df_since['High'].max()
+                    
+                    # 3. 환율 반영 계산 (원화 환산)
+                    buy_amt_krw = (row['평균매수가'] * row['주식수']) * rate
+                    val_amt_krw = (curr_price * row['주식수']) * rate
+                    
+                    p_rate = ((curr_price - row['평균매수가']) / row['평균매수가'] * 100) if row['평균매수가'] > 0 else 0
+                    
+                    portfolio_details.append({
+                        'idx': idx, 'row': row, 'curr': curr_price, 'mx': max_price, 
+                        'val_amt': val_amt_krw, 'buy_amt': buy_amt_krw, 'p_rate': p_rate, 'currency': currency
+                    })
+                    total_buy_amt_krw += buy_amt_krw
+                    total_val_amt_krw += val_amt_krw
             except: continue
     portfolio_details = sorted(portfolio_details, key=lambda x: x['val_amt'], reverse=True)
 
-# --- 타이틀 ---
+# --- 타이틀 및 환율 노출 ---
 st.title("📈 주식 관리 대시보드")
-st.write(f"**{date.today()}** 기준")
+cols_rate = st.columns(4)
+cols_rate[0].caption(f"🇺🇸 USD: {exchange_rates['USD']:,.2f}원")
+cols_rate[1].caption(f"🇯🇵 JPY(100): {exchange_rates['JPY']*100:,.2f}원")
+cols_rate[2].caption(f"🇬🇧 GBP: {exchange_rates['GBP']:,.2f}원")
+cols_rate[3].caption(f"🇨🇭 CHF: {exchange_rates['CHF']:,.2f}원")
 
 # --- A. 실시간 리스트 ---
 if portfolio_details:
-    st.subheader("■실시간 모니터링 및 신호 확인")
-    # [개선 반영] vertical_alignment="center"를 사용하여 CSS 의존도 낮춤
+    st.subheader("■ 실시간 모니터링 (원화 환산 기준)")
     h = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5], vertical_alignment="center")
-    titles = ["종목명", "기준일(고점)", "평단가", "수량", "평가금액", "현재가(대비)", "수익(률)", "신호", "", ""]
+    titles = ["종목명", "기준일(고점)", "평단가", "수량", "평가금액(₩)", "현재가(대비)", "수익(률)", "신호", "", ""]
     for i, t in enumerate(titles): h[i].markdown(f"<p style='color:gray; font-size:0.9em; margin-bottom:0;'><b>{t}</b></p>", unsafe_allow_html=True)
     
     for item in portfolio_details:
         st.markdown("<div class='stock-divider'></div>", unsafe_allow_html=True) 
         r, curr, mx, p_rate = item['row'], item['curr'], item['mx'], item['p_rate']
+        curr_sym = "₩" if item['currency'] == 'KRW' else "$" if item['currency'] == 'USD' else "¥" if item['currency'] == 'JPY' else "£"
+        
         sig, clr, bg = "HOLD", "#6c757d", "#e9ecef"
         if p_rate <= -10: sig, clr, bg = "💥 손절(SELL)", "white", "#dc3545"
         elif curr <= (mx * (1 - r['익절기준']/100)) and p_rate > 0: sig, clr, bg = "💰 익절(TAKE)", "white", "#28a745"
         elif p_rate >= 50: sig, clr, bg = "🔥 ADD(추매)", "white", "#007bff"
 
         d = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5], vertical_alignment="center")
-        
         d[0].markdown(f"**{r['종목명']}**")
-        d[1].markdown(f"<span style='font-size:0.85em;'>{r['기준일']}<br>(高:{mx:,.0f})</span>", unsafe_allow_html=True)
-        d[2].markdown(f"{r['평균매수가']:,.0f}")
+        d[1].markdown(f"<span style='font-size:0.85em;'>{r['기준일']}<br>(高:{mx:,.2f})</span>", unsafe_allow_html=True)
+        d[2].markdown(f"{r['평균매수가']:,.2f}")
         d[3].markdown(f"{r['주식수']}")
         d[4].markdown(f"{item['val_amt']:,.0f}원")
         
         drop_val = ((curr - mx) / mx * 100) if mx > 0 else 0
-        d[5].markdown(f"{curr:,.0f}원<br><span style='font-size:0.8em; color:{'#dc3545' if drop_val < 0 else '#28a745'};'>{drop_val:+.1f}%</span>", unsafe_allow_html=True)
+        d[5].markdown(f"{curr:,.2f}{curr_sym}<br><span style='font-size:0.8em; color:{'#dc3545' if drop_val < 0 else '#28a745'};'>{drop_val:+.1f}%</span>", unsafe_allow_html=True)
         
-        profit_val = item['val_amt'] - item['buy_amt']
-        d[6].markdown(f"<span style='color:{'#dc3545' if p_rate < 0 else '#28a745'}; font-weight:bold;'>{profit_val:,.0f}원<br>({p_rate:.1f}%)</span>", unsafe_allow_html=True)
-        
+        profit_val_krw = item['val_amt'] - item['buy_amt']
+        d[6].markdown(f"<span style='color:{'#dc3545' if p_rate < 0 else '#28a745'}; font-weight:bold;'>{profit_val_krw:,.0f}원<br>({p_rate:.1f}%)</span>", unsafe_allow_html=True)
         d[7].markdown(f"<div style='background-color:{bg}; color:{clr}; padding:4px 8px; border-radius:15px; text-align:center; font-weight:bold; font-size:0.7em;'>{sig}</div>", unsafe_allow_html=True)
         
         with d[8]:
@@ -177,27 +212,28 @@ if portfolio_details:
 
 st.divider()
 
-# --- B. 종목 추가/수정 (유지) ---
+# --- B. 종목 추가/수정 ---
 with st.container():
-    title_text = "🔍 종목 정보 수정" if st.session_state.edit_index is not None else "➕ 신규 종목 추가"
+    title_text = "🔍 종목 정보 수정" if st.session_state.edit_index is not None else "➕ 신규 종목 추가 (국내/해외)"
     with st.expander(title_text, expanded=(st.session_state.edit_index is not None)):
-        def_name, def_date, def_price, def_qty, def_target = "", date.today(), 0, 0, 15
+        def_name, def_date, def_price, def_qty, def_target = "", date.today(), 0.0, 0, 15
         if st.session_state.edit_index is not None:
             edit_row = st.session_state.portfolio.loc[st.session_state.edit_index]
             def_name, def_date = edit_row['종목명'], pd.to_datetime(edit_row['기준일']).date()
-            def_price, def_qty, def_target = int(edit_row['평균매수가']), int(edit_row['주식수']), int(edit_row['익절기준'])
+            def_price, def_qty, def_target = float(edit_row['평균매수가']), int(edit_row['주식수']), int(edit_row['익절기준'])
 
         c1, c2, c3, c4, c5 = st.columns(5)
-        with c1: add_name = st.selectbox("종목명", options=[""] + stock_names, index=(stock_names.index(def_name)+1 if def_name in stock_names else 0))
+        with c1: add_name = st.selectbox("종목 선택", options=[""] + stock_names, index=(stock_names.index(def_name)+1 if def_name in stock_names else 0))
         with c2: add_date = st.date_input("기준일", value=def_date)
-        with c3: add_price = st.number_input("평균매수가", min_value=0, value=def_price)
+        with c3: add_price = st.number_input("평균매수가(해당통화)", min_value=0.0, value=def_price, format="%.2f")
         with c4: add_qty = st.number_input("수량", min_value=0, value=def_qty)
         with c5: add_target = st.number_input("익절기준(%)", value=def_target)
 
         if st.button("저장", type="primary"):
             if add_name:
-                code_val = stock_dict[add_name]
-                new_row = {"종목명": add_name, "종목코드": code_val, "기준일": add_date.strftime('%Y-%m-%d'), "평균매수가": add_price, "주식수": add_qty, "익절기준": add_target}
+                code_val, currency_val = stock_dict_info[add_name]
+                new_row = {"종목명": add_name, "종목코드": code_val, "기준일": add_date.strftime('%Y-%m-%d'), 
+                           "평균매수가": add_price, "주식수": add_qty, "익절기준": add_target, "통화": currency_val}
                 if st.session_state.edit_index is not None:
                     st.session_state.portfolio.loc[st.session_state.edit_index] = new_row
                     st.session_state.edit_index = None
@@ -207,24 +243,24 @@ with st.container():
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- C. 자산 요약 (유지) ---
-st.subheader("📊 자산 요약 현황")
+# --- C. 자산 요약 (환율 반영 완료) ---
+st.subheader("📊 자산 요약 현황 (실시간 환율 반영)")
 curr_cash = load_cash()
-t_profit = total_val_amt - total_buy_amt
-t_rate = (t_profit / total_buy_amt * 100) if total_buy_amt > 0 else 0.0
+t_profit_krw = total_val_amt_krw - total_buy_amt_krw
+t_rate = (t_profit_krw / total_buy_amt_krw * 100) if total_buy_amt_krw > 0 else 0.0
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("💰 총 매수원금", f"{total_buy_amt:,.0f}원")
-m2.metric("📊 현재 평가액", f"{total_val_amt:,.0f}원")
-m3.metric("📈 총 수익 (수익률)", f"{t_profit:,.0f}원", delta=f"{t_rate:.2f}%")
-m4.metric("🏦 합계 자산(현금포함)", f"{total_val_amt + curr_cash:,.0f}원")
+m1.metric("💰 총 매수원금(₩)", f"{total_buy_amt_krw:,.0f}원")
+m2.metric("📊 현재 평가액(₩)", f"{total_val_amt_krw:,.0f}원")
+m3.metric("📈 총 수익 (수익률)", f"{t_profit_krw:,.0f}원", delta=f"{t_rate:.2f}%")
+m4.metric("🏦 합계 자산(현금포함)", f"{total_val_amt_krw + curr_cash:,.0f}원")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- D. 비중 분석 및 현금 관리 (유지) ---
+# --- D. 비중 분석 및 현금 관리 ---
 c_btm1, c_btm2 = st.columns([1.5, 1])
 with c_btm1:
-    if total_val_amt > 0:
+    if total_val_amt_krw > 0:
         st.subheader("🥧 자산 구성 비중")
         p_data = pd.DataFrame([{'종목': i['row']['종목명'], '금액': i['val_amt']} for i in portfolio_details])
         p_data = pd.concat([p_data, pd.DataFrame([{'종목': '예수금', '금액': curr_cash}])])
@@ -237,5 +273,3 @@ with c_btm2:
     nc = st.number_input("현재 보유 예수금(원)", value=curr_cash, step=10000.0)
     if st.button("현금 잔액 업데이트"):
         save_cash(nc); st.rerun()
-
-
