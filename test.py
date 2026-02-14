@@ -70,8 +70,21 @@ def save_cash(cash):
 
 @st.cache_data
 def get_stock_list():
-    df_krx = fdr.StockListing('KRX')
-    stocks = df_krx[['Name', 'Code']].set_index('Name').to_dict()['Code']
+    try:
+        # 1. 먼저 KRX 상장사 목록 시도
+        df_krx = fdr.StockListing('KRX')
+        stocks = df_krx[['Name', 'Code']].set_index('Name').to_dict()['Code']
+    except Exception as e:
+        try:
+            # 2. 실패 시 네이버 금융 데이터로 우회 시도
+            df_krx = fdr.StockListing('KOSPI')
+            df_kosdaq = fdr.StockListing('KOSDAQ')
+            df_combined = pd.concat([df_krx, df_kosdaq])
+            stocks = df_combined[['Name', 'Code']].set_index('Name').to_dict()['Code']
+        except:
+            # 3. 최후의 수단: 빈 딕셔너리 반환 (앱이 멈추지 않게 함)
+            stocks = {"삼성전자": "005930", "SK하이닉스": "000660"} 
+    
     try:
         df_etf = fdr.StockListing('ETF/KR')
         etfs = df_etf[['Name', 'Symbol']].set_index('Name').to_dict()['Symbol']
@@ -212,4 +225,5 @@ with c_btm2:
     st.subheader("💵 현금 관리")
     nc = st.number_input("현재 보유 예수금(원)", value=curr_cash, step=10000.0)
     if st.button("현금 잔액 업데이트"):
+
         save_cash(nc); st.rerun()
