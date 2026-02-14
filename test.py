@@ -136,7 +136,7 @@ if not st.session_state.portfolio.empty:
 
 # --- 타이틀 ---
 st.title("📈 주식 관리 대시보드")
-st.write(f"**{date.today()}** 기준 | 타이밍 관리기")
+st.write(f"**{date.today()}** 기준")
 
 # --- A. 실시간 리스트 (버튼 텍스트 및 스타일 수정) ---
 if portfolio_details:
@@ -242,3 +242,4 @@ with c_btm2:
     nc = st.number_input("현재 보유 예수금(원)", value=curr_cash, step=10000.0)
     if st.button("현금 잔액 업데이트"):
         save_cash(nc); st.rerun()
+
