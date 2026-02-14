@@ -6,7 +6,7 @@ import os
 from datetime import datetime, date
 
 # 1. 페이지 설정
-st.set_page_config(page_title="김팀장님의 주식관리 시스템 V2.7", layout="wide")
+st.set_page_config(page_title="김팀장님의 주식관리 시스템 V2.8", layout="wide")
 
 # 커스텀 CSS
 st.markdown("""
@@ -56,7 +56,7 @@ def get_exchange_rates():
         except: rates[curr] = 1.0
     return rates
 
-# 1. 종목 리스트 구성 (통화 정보 포함)
+# 종목 리스트 구성
 @st.cache_data
 def get_combined_stock_list():
     stocks = {}
@@ -85,7 +85,7 @@ exchange_rates = get_exchange_rates()
 if 'portfolio' not in st.session_state: st.session_state.portfolio = load_data()
 if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
-# --- 데이터 계산 ---
+# --- 데이터 계산 및 1. 평가금액순 정렬 ---
 portfolio_details = []
 total_buy_amt_krw = total_val_amt_krw = 0.0
 
@@ -111,6 +111,8 @@ if not st.session_state.portfolio.empty:
                     total_buy_amt_krw += buy_amt_krw
                     total_val_amt_krw += val_amt_krw
             except: continue
+    # 평가금액(val_amt) 기준 내림차순 정렬
+    portfolio_details = sorted(portfolio_details, key=lambda x: x['val_amt'], reverse=True)
 
 # --- 타이틀 및 환율 ---
 st.title("📈 주식 관리 대시보드")
@@ -150,83 +152,74 @@ if portfolio_details:
         d[7].markdown(f"<div style='background-color:{bg}; color:{clr}; padding:4px 8px; border-radius:15px; text-align:center; font-weight:bold; font-size:0.7em;'>{sig}</div>", unsafe_allow_html=True)
         
         with d[8]:
-            if st.button("수정", key=f"btn_e_{item['idx']}"):
+            if st.button("수정", key=f"e_{item['idx']}"):
                 st.session_state.edit_index = item['idx']
                 st.rerun()
         with d[9]:
-            if st.button("삭제", key=f"btn_d_{item['idx']}"):
+            if st.button("삭제", key=f"d_{item['idx']}"):
                 st.session_state.portfolio = st.session_state.portfolio.drop(item['idx'])
                 save_data(st.session_state.portfolio)
                 st.rerun()
 
 st.divider()
 
-# --- B. 종목 추가/수정 (로직 완전 수정) ---
+# --- B. 종목 추가/수정 (2. 종목 선택 및 입력 문제 해결) ---
 with st.container():
     is_edit = st.session_state.edit_index is not None
     title_text = "🔍 종목 정보 수정" if is_edit else "➕ 신규 종목 추가"
     
     with st.expander(title_text, expanded=is_edit):
-        # 기본값 설정
-        def_name_val = ""
-        def_date_val = date.today()
-        def_price_val = 0.0
-        def_qty_val = 0
-        def_target_val = 15
+        # 폼 초기값 설정
+        def_name = ""
+        def_date = date.today()
+        def_price = 0.0
+        def_qty = 0
+        def_target = 15
         
+        if is_edit and st.session_state.edit_index in st.session_state.portfolio.index:
+            edit_row = st.session_state.portfolio.loc[st.session_state.edit_index]
+            def_name = edit_row['종목명']
+            def_date = pd.to_datetime(edit_row['기준일']).date()
+            def_price = float(edit_row['평균매수가'])
+            def_qty = int(edit_row['주식수'])
+            def_target = int(edit_row['익절기준'])
+
+        # 폼 구현 (중요: key값을 주어 세션 상태 보존)
+        with st.form(key="stock_form", clear_on_submit=False):
+            c1, c2, c3, c4, c5 = st.columns(5)
+            
+            with c1:
+                idx_to_select = stock_names.index(def_name) + 1 if def_name in stock_names else 0
+                selected_name = st.selectbox("종목 선택", options=[""] + stock_names, index=idx_to_select)
+            with c2:
+                selected_date = st.date_input("기준일", value=def_date)
+            with c3:
+                selected_price = st.number_input("평균매수가", min_value=0.0, value=def_price)
+            with c4:
+                selected_qty = st.number_input("수량", min_value=0, value=def_qty)
+            with c5:
+                selected_target = st.number_input("익절기준(%)", value=def_target)
+
+            submit_btn = st.form_submit_state = st.form_submit_button("저장하기")
+            
+            if submit_btn:
+                if selected_name:
+                    code_val, curr_val = stock_info_dict[selected_name]
+                    new_data = {
+                        "종목명": selected_name, "종목코드": code_val, "기준일": selected_date.strftime('%Y-%m-%d'),
+                        "평균매수가": selected_price, "주식수": selected_qty, "익절기준": selected_target, "통화": curr_val
+                    }
+                    if is_edit:
+                        st.session_state.portfolio.loc[st.session_state.edit_index] = new_data
+                        st.session_state.edit_index = None
+                    else:
+                        st.session_state.portfolio = pd.concat([st.session_state.portfolio, pd.DataFrame([new_data])], ignore_index=True)
+                    
+                    save_data(st.session_state.portfolio)
+                    st.rerun()
+
         if is_edit:
-            # 수정할 행 데이터 가져오기
-            idx = st.session_state.edit_index
-            if idx in st.session_state.portfolio.index:
-                row = st.session_state.portfolio.loc[idx]
-                def_name_val = row['종목명']
-                def_date_val = pd.to_datetime(row['기준일']).date()
-                def_price_val = float(row['평균매수가'])
-                def_qty_val = int(row['주식수'])
-                def_target_val = int(row['익절기준'])
-
-        # 입력 필드 구성
-        c1, c2, c3, c4, c5 = st.columns(5)
-        
-        # 종목명 인덱스 찾기
-        try:
-            name_idx = stock_names.index(def_name_val) + 1 if def_name_val in stock_names else 0
-        except:
-            name_idx = 0
-
-        with c1: 
-            add_name = st.selectbox("종목 선택", options=[""] + stock_names, index=name_idx)
-        with c2: 
-            add_date = st.date_input("기준일", value=def_date_val)
-        with c3: 
-            add_price = st.number_input("평균매수가", min_value=0.0, value=def_price_val, format="%.2f")
-        with c4: 
-            add_qty = st.number_input("수량", min_value=0, value=def_qty_val)
-        with c5: 
-            add_target = st.number_input("익절기준(%)", value=def_target_val)
-
-        btn_label = "수정 완료" if is_edit else "종목 추가"
-        if st.button(btn_label, type="primary"):
-            if add_name:
-                code_val, currency_val = stock_info_dict[add_name]
-                new_row = {
-                    "종목명": add_name, "종목코드": code_val, 
-                    "기준일": add_date.strftime('%Y-%m-%d'), 
-                    "평균매수가": add_price, "주식수": add_qty, 
-                    "익절기준": add_target, "통화": currency_val
-                }
-                
-                if is_edit:
-                    st.session_state.portfolio.loc[st.session_state.edit_index] = new_row
-                    st.session_state.edit_index = None # 수정 모드 종료
-                else:
-                    st.session_state.portfolio = pd.concat([st.session_state.portfolio, pd.DataFrame([new_row])], ignore_index=True)
-                
-                save_data(st.session_state.portfolio)
-                st.rerun()
-        
-        if is_edit:
-            if st.button("수정 취소"):
+            if st.button("수정 취소", key="cancel_edit"):
                 st.session_state.edit_index = None
                 st.rerun()
 
@@ -251,5 +244,5 @@ st.subheader("💵 현금 관리")
 c_cash1, _ = st.columns([1, 2])
 with c_cash1:
     nc = st.number_input("현재 보유 예수금(원)", value=curr_cash, step=10000.0)
-    if st.button("현금 잔액 업데이트"):
+    if st.button("현금 잔액 업데이트", key="cash_update"):
         save_cash(nc); st.rerun()
