@@ -9,13 +9,12 @@ import plotly.express as px
 # 1. 페이지 설정 및 디자인 주입
 st.set_page_config(page_title="김팀장님의 주식관리 시스템 V2", layout="wide")
 
-# 커스텀 CSS: 자산 요약 및 버튼 스타일 수정
+# 커스텀 CSS: 기존 스타일 유지
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@100;400;700&display=swap');
     html, body, [class*="css"] { font-family: 'Noto+Sans+KR', sans-serif; }
     
-    /* 자산 요약 블록 크기 고정 */
     [data-testid="stMetric"] { 
         background-color: #f0f2f6; 
         padding: 15px; 
@@ -27,30 +26,26 @@ st.markdown("""
         justify-content: center;
     }
     
-    /* 종목 간 구분선 */
     .stock-divider {
         border-bottom: 1px solid #e0e0e0;
         margin: 5px 0;
         padding-bottom: 5px;
     }
     
-    /* 세로 중앙 정렬용 스타일 */
     .v-center {
         line-height: 2.5;
         font-weight: bold;
     }
 
-    /* [수정] 리스트 내 버튼 스타일링: 배경 제거 및 텍스트 강조 */
     .stButton>button[kind="secondary"] {
         background-color: transparent;
         border: none;
-        color: #007BFF; /* 수정 버튼 파란색 */
+        color: #007BFF; 
         text-decoration: underline;
         padding: 0;
         height: auto;
         font-size: 0.85em;
     }
-    /* 삭제 버튼 전용 스타일 (빨간색) */
     div[data-testid="column"]:nth-child(10) .stButton>button {
         color: #dc3545 !important;
     }
@@ -83,24 +78,24 @@ def load_cash():
 def save_cash(cash):
     with open(CASH_FILE, "w") as f: f.write(str(cash))
 
-# [수정] KRX 접속 에러 방지용 함수
+# [개선 반영] KRX 접속 에러 방지 및 코스피/코스닥 구분 로직 강화
 @st.cache_data
 def get_stock_list():
     try:
         df_krx = fdr.StockListing('KRX')
-        stocks = df_krx[['Name', 'Code']].set_index('Name').to_dict()['Code']
+        # Market 정보를 함께 가져와서 .KS / .KQ 구분 기반 마련
+        stocks = {}
+        for _, row in df_krx.iterrows():
+            code = row['Code']
+            suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ" if row['Market'] == 'KOSDAQ' else ""
+            stocks[row['Name']] = f"{code}{suffix}"
     except:
-        try:
-            df_krx = fdr.StockListing('KOSPI')
-            df_kosdaq = fdr.StockListing('KOSDAQ')
-            df_combined = pd.concat([df_krx, df_kosdaq])
-            stocks = df_combined[['Name', 'Code']].set_index('Name').to_dict()['Code']
-        except:
-            stocks = {"삼성전자": "005930", "SK하이닉스": "000660"} 
+        stocks = {"삼성전자": "005930.KS", "SK하이닉스": "000660.KS"} 
+    
     try:
         df_etf = fdr.StockListing('ETF/KR')
-        etfs = df_etf[['Name', 'Symbol']].set_index('Name').to_dict()['Symbol']
-        stocks.update(etfs)
+        for _, row in df_etf.iterrows():
+            stocks[row['Name']] = f"{row['Symbol']}.KS"
     except: pass
     return stocks
 
@@ -110,7 +105,7 @@ stock_names = sorted(list(stock_dict.keys()))
 if 'portfolio' not in st.session_state: st.session_state.portfolio = load_data()
 if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
-# --- 데이터 계산 (상단 처리) ---
+# --- 데이터 계산 ---
 portfolio_details = []
 total_buy_amt = total_val_amt = 0.0
 
@@ -118,9 +113,11 @@ if not st.session_state.portfolio.empty:
     with st.spinner('실시간 시세 동기화 중...'):
         for idx, row in st.session_state.portfolio.iterrows():
             ticker = str(row['종목코드'])
-            yf_ticker = f"{ticker}.KS" if ticker.isdigit() and len(ticker)==6 else ticker
+            # [개선 반영] 접미사가 없는 경우만 처리 (속도 향상을 위해 period="1mo"로 최적화)
+            yf_ticker = ticker if "." in ticker else f"{ticker}.KS"
             try:
-                df_h = yf.Ticker(yf_ticker).history(period="1y")
+                # 1년치 데이터 대신 최근 1개월(고점 계산용) 데이터만 가져와 속도 개선
+                df_h = yf.Ticker(yf_ticker).history(period="1mo") 
                 if not df_h.empty:
                     ref_dt = pd.to_datetime(row['기준일']).tz_localize('Asia/Seoul')
                     df_since = df_h[df_h.index >= ref_dt]
@@ -138,12 +135,13 @@ if not st.session_state.portfolio.empty:
 st.title("📈 주식 관리 대시보드")
 st.write(f"**{date.today()}** 기준")
 
-# --- A. 실시간 리스트 (버튼 텍스트 및 스타일 수정) ---
+# --- A. 실시간 리스트 ---
 if portfolio_details:
     st.subheader("■실시간 모니터링 및 신호 확인")
-    h = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5]) # 너비 소폭 조정
+    # [개선 반영] vertical_alignment="center"를 사용하여 CSS 의존도 낮춤
+    h = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5], vertical_alignment="center")
     titles = ["종목명", "기준일(고점)", "평단가", "수량", "평가금액", "현재가(대비)", "수익(률)", "신호", "", ""]
-    for i, t in enumerate(titles): h[i].markdown(f"<p style='color:gray; font-size:0.9em;'><b>{t}</b></p>", unsafe_allow_html=True)
+    for i, t in enumerate(titles): h[i].markdown(f"<p style='color:gray; font-size:0.9em; margin-bottom:0;'><b>{t}</b></p>", unsafe_allow_html=True)
     
     for item in portfolio_details:
         st.markdown("<div class='stock-divider'></div>", unsafe_allow_html=True) 
@@ -153,13 +151,13 @@ if portfolio_details:
         elif curr <= (mx * (1 - r['익절기준']/100)) and p_rate > 0: sig, clr, bg = "💰 익절(TAKE)", "white", "#28a745"
         elif p_rate >= 50: sig, clr, bg = "🔥 ADD(추매)", "white", "#007bff"
 
-        d = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5])
+        d = st.columns([1.5, 1.2, 0.8, 0.5, 1.2, 1.2, 1.2, 1.0, 0.5, 0.5], vertical_alignment="center")
         
-        d[0].markdown(f"<div class='v-center'>{r['종목명']}</div>", unsafe_allow_html=True)
+        d[0].markdown(f"**{r['종목명']}**")
         d[1].markdown(f"<span style='font-size:0.85em;'>{r['기준일']}<br>(高:{mx:,.0f})</span>", unsafe_allow_html=True)
-        d[2].markdown(f"<div class='v-center'>{r['평균매수가']:,.0f}</div>", unsafe_allow_html=True)
-        d[3].markdown(f"<div class='v-center'>{r['주식수']}</div>", unsafe_allow_html=True)
-        d[4].markdown(f"<div class='v-center'>{item['val_amt']:,.0f}원</div>", unsafe_allow_html=True)
+        d[2].markdown(f"{r['평균매수가']:,.0f}")
+        d[3].markdown(f"{r['주식수']}")
+        d[4].markdown(f"{item['val_amt']:,.0f}원")
         
         drop_val = ((curr - mx) / mx * 100) if mx > 0 else 0
         d[5].markdown(f"{curr:,.0f}원<br><span style='font-size:0.8em; color:{'#dc3545' if drop_val < 0 else '#28a745'};'>{drop_val:+.1f}%</span>", unsafe_allow_html=True)
@@ -167,15 +165,12 @@ if portfolio_details:
         profit_val = item['val_amt'] - item['buy_amt']
         d[6].markdown(f"<span style='color:{'#dc3545' if p_rate < 0 else '#28a745'}; font-weight:bold;'>{profit_val:,.0f}원<br>({p_rate:.1f}%)</span>", unsafe_allow_html=True)
         
-        d[7].markdown(f"<div style='margin-top:12px; background-color:{bg}; color:{clr}; padding:4px 8px; border-radius:15px; text-align:center; font-weight:bold; font-size:0.7em;'>{sig}</div>", unsafe_allow_html=True)
+        d[7].markdown(f"<div style='background-color:{bg}; color:{clr}; padding:4px 8px; border-radius:15px; text-align:center; font-weight:bold; font-size:0.7em;'>{sig}</div>", unsafe_allow_html=True)
         
-        # [수정] 아이콘 대신 텍스트로 변경 및 세로 중앙 정렬
         with d[8]:
-            st.markdown("<div style='padding-top:12px;'></div>", unsafe_allow_html=True)
             if st.button("수정", key=f"e_{item['idx']}"):
                 st.session_state.edit_index = item['idx']; st.rerun()
         with d[9]:
-            st.markdown("<div style='padding-top:12px;'></div>", unsafe_allow_html=True)
             if st.button("삭제", key=f"d_{item['idx']}"):
                 st.session_state.portfolio = st.session_state.portfolio.drop(item['idx'])
                 save_data(st.session_state.portfolio); st.rerun()
@@ -201,8 +196,8 @@ with st.container():
 
         if st.button("저장", type="primary"):
             if add_name:
-                code = stock_dict[add_name]
-                new_row = {"종목명": add_name, "종목코드": f"{code}.KS" if str(code).isdigit() and len(str(code))==6 else code, "기준일": add_date.strftime('%Y-%m-%d'), "평균매수가": add_price, "주식수": add_qty, "익절기준": add_target}
+                code_val = stock_dict[add_name]
+                new_row = {"종목명": add_name, "종목코드": code_val, "기준일": add_date.strftime('%Y-%m-%d'), "평균매수가": add_price, "주식수": add_qty, "익절기준": add_target}
                 if st.session_state.edit_index is not None:
                     st.session_state.portfolio.loc[st.session_state.edit_index] = new_row
                     st.session_state.edit_index = None
@@ -212,7 +207,7 @@ with st.container():
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- C. 자산 요약 (하단 배치 및 크기 통일) ---
+# --- C. 자산 요약 (유지) ---
 st.subheader("📊 자산 요약 현황")
 curr_cash = load_cash()
 t_profit = total_val_amt - total_buy_amt
@@ -226,7 +221,7 @@ m4.metric("🏦 합계 자산(현금포함)", f"{total_val_amt + curr_cash:,.0f}
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- D. 비중 분석 및 현금 관리 ---
+# --- D. 비중 분석 및 현금 관리 (유지) ---
 c_btm1, c_btm2 = st.columns([1.5, 1])
 with c_btm1:
     if total_val_amt > 0:
@@ -242,4 +237,3 @@ with c_btm2:
     nc = st.number_input("현재 보유 예수금(원)", value=curr_cash, step=10000.0)
     if st.button("현금 잔액 업데이트"):
         save_cash(nc); st.rerun()
-
