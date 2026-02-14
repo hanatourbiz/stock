@@ -73,7 +73,7 @@ def load_cash():
 def save_cash(cash):
     with open(CASH_FILE, "w") as f: f.write(str(cash))
 
-# [개선 반영] 시장 구분 로직 포함된 종목 리스트 생성
+# [개선] 시장 구분 및 종목 리스트 최적화
 @st.cache_data
 def get_stock_list():
     try:
@@ -81,13 +81,15 @@ def get_stock_list():
         stocks = {}
         for _, row in df_krx.iterrows():
             code = row['Code']
+            # 코스피(.KS), 코스닥(.KQ) 접미사 자동 할당
             suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ" if row['Market'] == 'KOSDAQ' else ""
             stocks[row['Name']] = f"{code}{suffix}"
             
-        # ETF 리스트 추가
+        # ETF 리스트 보완
         try:
             df_etf = fdr.StockListing('ETF/KR')
             for _, row in df_etf.iterrows():
+                # ETF는 주로 코스피 시장(.KS)으로 연동
                 stocks[row['Name']] = f"{row['Symbol']}.KS"
         except: pass
         return stocks
@@ -95,7 +97,6 @@ def get_stock_list():
         return {"삼성전자": "005930.KS", "SK하이닉스": "000660.KS"}
 
 stock_dict = get_stock_list()
-stock_names = sorted(list(stock_dict.keys()))
 
 if 'portfolio' not in st.session_state: st.session_state.portfolio = load_data()
 if 'edit_index' not in st.session_state: st.session_state.edit_index = None
@@ -166,7 +167,7 @@ if portfolio_details:
 
 st.divider()
 
-# --- B. 종목 추가/수정 (시장 구분 기능 통합) ---
+# --- B. 종목 추가/수정 (시장 필터링 적용) ---
 with st.container():
     title_text = "🔍 종목 정보 수정" if st.session_state.edit_index is not None else "➕ 신규 종목 추가"
     with st.expander(title_text, expanded=(st.session_state.edit_index is not None)):
@@ -176,23 +177,30 @@ with st.container():
             def_name, def_date = edit_row['종목명'], pd.to_datetime(edit_row['기준일']).date()
             def_price, def_qty, def_target = int(edit_row['평균매수가']), int(edit_row['주식수']), int(edit_row['익절기준'])
 
-        # 시장 필터링 레이아웃
         c0, c1, c2, c3, c4, c5 = st.columns([0.8, 1.5, 1.2, 1, 0.8, 0.8])
         
         with c0:
             market_choice = st.selectbox("시장", ["KOSPI", "KOSDAQ", "ETF"])
         
         with c1:
-            # 시장별 리스트 필터링
+            # ETF 식별 단어 (대소문자 무시)
+            etf_keywords = ["KODEX", "TIGER", "RISE", "ACE", "SOL", "ARIRANG", "HANARO", "KOSEF", "KBSTAR"]
+            
             if market_choice == "KOSPI":
-                display_list = [n for n, c in stock_dict.items() if ".KS" in c and not any(etf in n for etf in ["KODEX", "TIGER", "RISE", "ACE"])]
+                display_list = [n for n, c in stock_dict.items() if ".KS" in c and not any(etf in n.upper() for etf in etf_keywords)]
             elif market_choice == "KOSDAQ":
                 display_list = [n for n, c in stock_dict.items() if ".KQ" in c]
             else: # ETF
-                display_list = [n for n, c in stock_dict.items() if any(etf in n for etf in ["KODEX", "TIGER", "RISE", "ACE", "SOL"])]
+                display_list = [n for n, c in stock_dict.items() if any(etf in n.upper() for etf in etf_keywords)]
             
             display_list = sorted(display_list)
-            add_name = st.selectbox("종목명", options=[""] + display_list, index=(display_list.index(def_name)+1 if def_name in display_list else 0))
+            
+            # 검색 및 선택
+            if not display_list:
+                add_name = st.selectbox("종목명", options=["종목 없음"])
+            else:
+                idx_val = display_list.index(def_name) + 1 if def_name in display_list else 0
+                add_name = st.selectbox("종목명", options=[""] + display_list, index=idx_val)
         
         with c2: add_date = st.date_input("기준일", value=def_date)
         with c3: add_price = st.number_input("평균매수가", min_value=0, value=def_price)
@@ -200,7 +208,7 @@ with st.container():
         with c5: add_target = st.number_input("익절(%)", value=def_target)
 
         if st.button("저장", type="primary"):
-            if add_name:
+            if add_name and add_name != "종목 없음":
                 code_val = stock_dict[add_name]
                 new_row = {"종목명": add_name, "종목코드": code_val, "기준일": add_date.strftime('%Y-%m-%d'), "평균매수가": add_price, "주식수": add_qty, "익절기준": add_target}
                 if st.session_state.edit_index is not None:
